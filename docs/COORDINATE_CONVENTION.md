@@ -61,22 +61,115 @@ and must not be considered visible.
 
 ---
 
-## 4. Camera Orientation
+## 4. Camera Orientation & Pan/Tilt Rotation Convention
 
-The camera orientation is represented using pan and tilt angles.
+This section is authoritative.
 
-The implementation must define the rotation convention explicitly and use it consistently across:
+Future modules including scene simulation, gimbal dynamics, control, tracking and prediction must use this exact convention.
 
-- world-to-camera transformation
-- camera-to-world transformation
-- target line-of-sight calculation
-- pixel projection
-- angular error calculation
-- gimbal control
+Do not introduce another pan/tilt sign convention elsewhere.
 
-No other module may silently introduce a different rotation convention.
+### Coordinate frames:
 
----
+World frame:
+    +X = right
+    +Y = up
+    +Z = forward
+
+Camera frame:
+    +X = right
+    +Y = up
+    +Z = forward
+
+### Transformation:
+
+    P_relative = P_world - P_camera
+
+    P_camera =
+        R_tilt(theta) @
+        R_pan(phi) @
+        P_relative
+
+This is a passive world-to-camera coordinate transformation.
+
+### PAN:
+
+    Pan axis = world vertical Y-axis.
+
+    Positive pan rotates the camera to the RIGHT.
+
+    Under the world-to-camera transformation, a forward
+    target moves toward negative camera X.
+
+    Therefore:
+
+        +pan
+            -> camera rotates right
+            -> stationary target appears left in image
+            -> target camera-frame X becomes negative
+
+Use:
+
+    R_pan(phi) =
+        [[ cos(phi), 0, -sin(phi)],
+         [ 0,        1,  0       ],
+         [ sin(phi), 0,  cos(phi)]]
+
+### TILT:
+
+    Tilt axis = intermediate horizontal X-axis after pan.
+
+    Positive tilt rotates the camera DOWN.
+
+    Under the world-to-camera transformation, a forward
+    target moves toward positive camera Y.
+
+    Therefore:
+
+        +tilt
+            -> camera rotates down
+            -> stationary target appears up in image
+            -> target camera-frame Y becomes positive
+
+Use:
+
+    R_tilt(theta) =
+        [[1, 0,          0         ],
+         [0, cos(theta), sin(theta)],
+         [0, -sin(theta),cos(theta)]]
+
+### COMPOSITION:
+
+    Pan is applied first.
+
+    Tilt is applied second.
+
+    Therefore:
+
+        P_camera =
+            R_tilt(theta) @
+            R_pan(phi) @
+            P_relative
+
+### ANGLES:
+
+    Internal geometry rotation inputs are radians.
+
+### IMAGE RELATIONSHIP:
+
+    Camera-frame +X projects toward increasing image u
+    (right).
+
+    Camera-frame +Y projects toward decreasing image v
+    (up).
+
+    Therefore:
+
+        +camera X -> image right
+        -camera X -> image left
+
+        +camera Y -> image up
+        -camera Y -> image down
 
 ## 5. Default FPA Resolution
 
