@@ -1,0 +1,325 @@
+# FSOC-PAT-26169 Architecture
+
+## 1. Purpose
+
+FSOC-PAT-26169 is a software simulation and benchmarking system for autonomous coarse alignment and tracking of a moving optical beacon for mobile Free Space Optical Communication (FSOC) terminals.
+
+The system shall detect, identify, track, predict, and maintain lock on a designated moving beacon using a virtual camera and virtual pan-tilt mechanism.
+
+The implementation is simulation/software based. It must not claim real hardware control, live satellite ephemeris, or physical optical-terminal operation.
+
+---
+
+## 2. High-Level Pipeline
+
+```text
+Virtual Scene
+     |
+     v
+Target Motion
+     |
+     v
+3D Camera Geometry
+     |
+     v
+Virtual Sensor
+     |
+     v
+Disturbance / Atmosphere Models
+     |
+     v
+Beacon Detection
+     |
+     v
+Subpixel Centroiding
+     |
+     v
+AI Beacon Identification
+     |
+     v
+Temporal + Modulation Verification
+     |
+     v
+Tracking State Machine
+     |
+     v
+State Estimation / Kalman Filter
+     |
+     v
+Target Prediction
+     |
+     v
+Evidence + Trust Fusion
+     |
+     v
+Predictive Gimbal Controller
+     |
+     v
+Camera Repositioning
+     |
+     +----------------------+
+     |                      |
+     +---- feedback --------+
+````
+
+---
+
+## 3. Single Source of Truth
+
+There must be exactly one authoritative implementation of each major subsystem.
+
+The following must NOT be duplicated:
+
+* Camera projection
+* Target motion
+* Beacon detection
+* Tracking
+* Kalman filtering
+* Prediction
+* Gimbal dynamics
+* Control
+* Metrics
+
+Simulation and MP4 benchmark modes must use the same tracking core.
+
+The UI must not implement an independent tracking algorithm.
+
+---
+
+## 4. Core Components
+
+### `core/scene.py`
+
+Responsible for:
+
+* Virtual world
+* Target definitions
+* Target state
+* Target motion execution
+
+Must not perform image detection or camera control.
+
+### `core/geometry.py`
+
+Responsible for:
+
+* Coordinate transformations
+* Camera orientation
+* World-to-camera transformation
+* Pinhole projection
+* Pixel-to-angle conversion
+* Field-of-view checks
+
+This is the only authoritative camera geometry implementation.
+
+### `core/sensor.py`
+
+Responsible for:
+
+* FPA generation
+* Beacon image formation
+* Sensor characteristics
+* Resolution
+* Frame generation
+
+Must not perform target identification.
+
+### `core/disturbances.py`
+
+Responsible for:
+
+* Gaussian noise
+* Poisson noise
+* Salt-and-pepper noise
+* Camera jitter
+* Platform motion
+
+### `core/atmosphere.py`
+
+Responsible for:
+
+* Clear atmosphere
+* Haze
+* Fog
+* Rain
+* Low-light effects
+
+### `core/detection.py`
+
+Responsible for:
+
+* Image preprocessing
+* Background subtraction
+* Beacon candidate detection
+* Connected components
+* Candidate feature extraction
+* Subpixel centroid estimation
+
+### `core/ai_identity.py`
+
+Responsible for:
+
+* Beacon appearance classification
+* AI confidence
+* Candidate identity verification
+
+The first-stage classifier should be lightweight enough for real-time operation.
+
+### `core/modulation.py`
+
+Responsible for:
+
+* Temporal beacon signature verification
+* 15 Hz beacon modulation verification
+
+### `core/kalman.py`
+
+Responsible for:
+
+* State estimation
+* Prediction covariance
+* Measurement update
+* Measurement gating
+* Variable timestep handling
+
+### `core/tracking.py`
+
+Responsible for:
+
+* SEARCHING
+* ACQUIRING
+* LOCKED
+* COASTING
+* REACQUIRING
+* LOST
+
+The state machine must explicitly handle temporary target loss and reacquisition.
+
+### `core/prediction.py`
+
+Responsible for:
+
+* Velocity estimation
+* Future target position
+* Latency compensation
+* Motion prediction
+
+### `core/confidence.py`
+
+Responsible for calculating tracking confidence.
+
+### `core/trust.py`
+
+Responsible for evidence fusion between:
+
+* Vision
+* AI
+* Motion consistency
+* Model prediction
+* Temporal consistency
+* Beacon modulation
+
+### `core/gimbal.py`
+
+Responsible for:
+
+* Pan/tilt state
+* Angular limits
+* Angular velocity limits
+* Gimbal dynamics
+
+### `core/control.py`
+
+Responsible for:
+
+* Pointing error
+* Predictive control
+* PD control
+* Velocity feed-forward
+* Latency compensation
+
+### `core/simulator.py`
+
+Responsible for connecting the core components into the complete simulation pipeline.
+
+---
+
+## 5. Benchmark Architecture
+
+The benchmark subsystem must never create a special tracking implementation.
+
+```text
+Simulation Input ──┐
+                   |
+                   v
+              Common Core
+                   ^
+                   |
+MP4 Input ─────────┘
+```
+
+The difference between simulation and MP4 mode is only the source of frames/ground truth.
+
+---
+
+## 6. Ground Truth Rule
+
+Ground truth may be used for:
+
+* Evaluation
+* Benchmarking
+* Error calculation
+* Performance reports
+* Debugging visualizations
+
+Ground truth must NEVER be supplied to:
+
+* Detector
+* Tracker
+* Kalman measurement
+* AI classifier
+* Controller
+
+Otherwise the benchmark would leak information unavailable to the tracking system.
+
+---
+
+## 7. User Interface
+
+The UI belongs under `ui/`.
+
+The UI displays telemetry generated by the Python engine.
+
+The UI must not maintain a second independent:
+
+* detector
+* tracker
+* Kalman filter
+* controller
+* simulator
+
+The Python engine is the authoritative source of tracking state.
+
+---
+
+## 8. Performance Philosophy
+
+Every major subsystem must have measurable behavior.
+
+The system must record:
+
+* FPS
+* Processing time
+* Acquisition time
+* Centroid error
+* Pointing error
+* Average tracking error
+* Maximum tracking error
+* Lock retention
+* Target loss
+* Reacquisition time
+* False-lock events
+
+Claims of performance must come from recorded measurements.
+
+```
