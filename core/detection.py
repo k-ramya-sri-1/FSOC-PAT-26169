@@ -1,14 +1,13 @@
-"""Authoritative Classical Computer Vision Beacon Detection for FSOC-PAT-26169.
+"""
+Beacon detection and candidate extraction for FSOC-PAT-26169.
 
-This module processes a 2D monochrome image to locate bright beacon candidates using
-classical image processing and intensity-weighted connected-component centroid estimation.
-
-Follows docs/ARCHITECTURE.md, docs/INTERFACES.md, docs/DEVELOPMENT_RULES.md,
-docs/TEST_STRATEGY.md, and docs/PS_REQUIREMENTS.md.
+This module provides spatial candidate detection algorithms that extract region-of-interest
+candidates from sensor images without ground-truth dependency.
 """
 
 from dataclasses import dataclass
-from typing import List, Optional
+import math
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -16,167 +15,130 @@ import numpy as np
 
 @dataclass(frozen=True)
 class DetectionConfig:
-    """Configuration parameters for classical computer vision beacon detection."""
+    """Configuration parameters for BeaconDetector."""
 
-    threshold: float = 100.0
-    min_area: float = 2.0
-    max_area: float = 500.0
-    min_peak: float = 120.0
+    threshold: float = 128.0
+    min_area: float = 4.0
+    max_area: float = 1000.0
+    max_candidates: int = 10
 
     def __post_init__(self) -> None:
-        """Validate detection configuration parameters."""
-        if self.threshold < 0.0 or self.threshold > 255.0:
+        """Validate detection configuration values."""
+        if not math.isfinite(self.threshold) or self.threshold < 0.0 or self.threshold > 255.0:
             raise ValueError(f"threshold must be in [0, 255], got {self.threshold}")
-        if self.min_area <= 0.0:
-            raise ValueError(f"min_area must be positive, got {self.min_area}")
-        if self.max_area <= self.min_area:
+        if not math.isfinite(self.min_area) or self.min_area <= 0.0:
+            raise ValueError(f"min_area must be finite and > 0, got {self.min_area}")
+        if not math.isfinite(self.max_area) or self.max_area < self.min_area:
             raise ValueError(
-                f"max_area ({self.max_area}) must be strictly greater than min_area ({self.min_area})"
+                f"max_area ({self.max_area}) must be >= min_area ({self.min_area})"
             )
-        if self.min_peak < 0.0 or self.min_peak > 255.0:
-            raise ValueError(f"min_peak must be in [0, 255], got {self.min_peak}")
+        if self.max_candidates <= 0:
+            raise ValueError(f"max_candidates must be > 0, got {self.max_candidates}")
 
 
 @dataclass(frozen=True)
 class DetectionCandidate:
-    """Detected candidate metadata extracted from image connected components."""
+    """Immutable representation of a single detected ROI candidate."""
 
-    centroid_x: float
-    centroid_y: float
+    candidate_id: int
+    centroid: Tuple[float, float]
     area: float
+    bounding_box: Tuple[int, int, int, int]  # (xmin, ymin, xmax, ymax)
     peak_intensity: float
     mean_intensity: float
-    bbox_x: int
-    bbox_y: int
-    bbox_width: int
-    bbox_height: int
+
+    def __post_init__(self) -> None:
+        """Validate candidate fields."""
+        if self.candidate_id <= 0:
+            raise ValueError(f"candidate_id must be > 0, got {self.candidate_id}")
+        if not math.isfinite(self.centroid[0]) or not math.isfinite(self.centroid[1]):
+            raise ValueError(f"centroid coordinates must be finite, got {self.centroid}")
+        if not math.isfinite(self.area) or self.area <= 0.0:
+            raise ValueError(f"area must be finite and > 0, got {self.area}")
+        xmin, ymin, xmax, ymax = self.bounding_box
+        if xmax <= xmin or ymax <= ymin:
+            raise ValueError(f"invalid bounding box dimensions: {self.bounding_box}")
 
 
 class BeaconDetector:
-    """Classical Computer Vision detector locating optical beacon candidates in monochrome images."""
+    """Spatial ROI detector that extracts candidate target regions from monochrome frames."""
 
     def __init__(self, config: Optional[DetectionConfig] = None) -> None:
         self.config = config if config is not None else DetectionConfig()
 
     def detect(self, image: np.ndarray) -> List[DetectionCandidate]:
-        """Detect beacon candidates from a 2D monochrome image.
+        """Detect candidate regions of interest in the input image.
 
         Args:
-            image: 2D monochrome image array (e.g., float32 or uint8).
+            image: 2D monochrome numpy array (uint8 or float scaled to 0-255).
 
         Returns:
-            List of DetectionCandidate objects ordered deterministically by:
-            1. Descending peak intensity
-            2. Descending area
-            3. Ascending centroid_y
-            4. Ascending centroid_x
+            List of DetectionCandidate dataclasses sorted deterministically by location.
         """
-        self._validate_input_image(image)
+        if not isinstance(image, np.ndarray) or image.ndim != 2:
+            raise ValueError("Input image must be a 2D numpy array")
 
-        # Work on uint8 binary threshold image for connected components
-        img_float = image.astype(np.float32)
-        thresh_val = float(self.config.threshold)
+        if image.dtype != np.uint8:
+            img_uint8 = np.clip(image, 0, 255).astype(np.uint8)
+        else:
+            img_uint8 = image
 
-        # Binarize image using threshold
-        _, binary_img = cv2.threshold(
-            img_float, thresh_val, 255, cv2.THRESH_BINARY
-        )
-        binary_uint8 = binary_img.astype(np.uint8)
+        thresh_val = int(round(self.config.threshold))
+        _, binary_img = cv2.threshold(img_uint8, thresh_val, 255, cv2.THRESH_BINARY)
 
-        # Connected component analysis with 8-connectivity
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
-            binary_uint8, connectivity=8
+        contours, _ = cv2.findContours(
+            binary_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
 
-        candidates: List[DetectionCandidate] = []
-
-        # Iterate over all components (label 0 is background)
-        for label_id in range(1, num_labels):
-            area = float(stats[label_id, cv2.CC_STAT_AREA])
-
-            # Area filtering
-            if area < self.config.min_area or area > self.config.max_area:
+        raw_extracted = []
+        for contour in contours:
+            area = float(cv2.contourArea(contour))
+            if not (self.config.min_area <= area <= self.config.max_area):
                 continue
 
-            bx = int(stats[label_id, cv2.CC_STAT_LEFT])
-            by = int(stats[label_id, cv2.CC_STAT_TOP])
-            bw = int(stats[label_id, cv2.CC_STAT_WIDTH])
-            bh = int(stats[label_id, cv2.CC_STAT_HEIGHT])
-
-            # Extract 2D component image bounding region and label mask
-            component_image = img_float[by : by + bh, bx : bx + bw]
-            comp_mask = (labels[by : by + bh, bx : bx + bw] == label_id)
-
-            comp_pixels = component_image[comp_mask]
-
-            if comp_pixels.size == 0:
+            moments = cv2.moments(contour)
+            if moments["m00"] == 0:
                 continue
 
-            peak_intensity = float(np.max(comp_pixels))
+            cx = float(moments["m10"] / moments["m00"])
+            cy = float(moments["m01"] / moments["m00"])
 
-            # Peak intensity filtering
-            if peak_intensity < self.config.min_peak:
-                continue
+            x, y, w, h = cv2.boundingRect(contour)
+            xmin, ymin, xmax, ymax = int(x), int(y), int(x + w), int(y + h)
 
-            mean_intensity = float(np.mean(comp_pixels))
+            mask = np.zeros_like(img_uint8)
+            cv2.drawContours(mask, [contour], -1, 255, -1)
 
-            # Intensity-weighted 2D weights for subpixel centroid calculation
-            weights = np.where(comp_mask, component_image, 0.0)
-            total_weight = float(np.sum(weights))
+            mean_val = float(cv2.mean(img_uint8, mask=mask)[0])
+            _, max_val, _, _ = cv2.minMaxLoc(img_uint8, mask=mask)
+            peak_val = float(max_val)
 
-            if total_weight > 0.0:
-                grid_y, grid_x = np.ogrid[:bh, :bw]
-                cx_local = float(np.sum(grid_x * weights) / total_weight)
-                cy_local = float(np.sum(grid_y * weights) / total_weight)
-                cx = float(bx) + cx_local
-                cy = float(by) + cy_local
-            else:
-                # Fallback to geometric centroid from stats if weight is zero
-                cx = float(centroids[label_id][0])
-                cy = float(centroids[label_id][1])
+            raw_extracted.append(
+                {
+                    "centroid_sort_key": (round(cy, 4), round(cx, 4)),
+                    "centroid": (cx, cy),
+                    "area": area,
+                    "bounding_box": (xmin, ymin, xmax, ymax),
+                    "peak_intensity": peak_val,
+                    "mean_intensity": mean_val,
+                }
+            )
 
+        # Sort candidates deterministically by spatial location (y then x)
+        raw_extracted.sort(key=lambda c: c["centroid_sort_key"])
+        selected = raw_extracted[: self.config.max_candidates]
+
+        candidates = []
+        for idx, item in enumerate(selected, start=1):
             candidates.append(
                 DetectionCandidate(
-                    centroid_x=cx,
-                    centroid_y=cy,
-                    area=area,
-                    peak_intensity=peak_intensity,
-                    mean_intensity=mean_intensity,
-                    bbox_x=bx,
-                    bbox_y=by,
-                    bbox_width=bw,
-                    bbox_height=bh,
+                    candidate_id=idx,
+                    centroid=item["centroid"],
+                    area=item["area"],
+                    bounding_box=item["bounding_box"],
+                    peak_intensity=item["peak_intensity"],
+                    mean_intensity=item["mean_intensity"],
                 )
             )
 
-        # Deterministic ordering:
-        # 1. Descending peak intensity
-        # 2. Descending area
-        # 3. Ascending centroid_y
-        # 4. Ascending centroid_x
-        candidates.sort(
-            key=lambda c: (
-                -c.peak_intensity,
-                -c.area,
-                c.centroid_y,
-                c.centroid_x,
-            )
-        )
-
         return candidates
-
-    @staticmethod
-    def _validate_input_image(image: np.ndarray) -> None:
-        """Validate input image array shape and format."""
-        if image is None:
-            raise ValueError("Input image cannot be None")
-        if not isinstance(image, np.ndarray):
-            raise ValueError(
-                f"Input image must be a NumPy array, got {type(image)}"
-            )
-        if image.ndim != 2:
-            raise ValueError(
-                f"Input image must be a 2D monochrome array, got shape {image.shape}"
-            )
-        if image.size == 0 or image.shape[0] == 0 or image.shape[1] == 0:
-            raise ValueError("Input image array cannot be empty")
