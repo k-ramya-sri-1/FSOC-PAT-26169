@@ -114,3 +114,10 @@ Predictive Gimbal Controller
       |
       v
 Virtual Camera
+
+## Closed-Loop Simulator
+
+The Stage 1N integration is exposed through `core.simulator.ClosedLoopSimulator`.
+Create a simulator with `SimulatorConfig`, call `step()` for timestamped telemetry,
+and call `reset()` to reproduce the configured run. Ground truth is retained in
+telemetry for evaluation; detection and control operate on simulated observations.

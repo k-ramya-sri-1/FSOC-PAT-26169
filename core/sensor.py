@@ -31,6 +31,8 @@ class SensorConfig:
     camera_config: CameraConfig = field(default_factory=CameraConfig)
     beacon_diameter: float = 10.0
     peak_intensity: float = 255.0
+    modulation_frequency_hz: float = 15.0
+    modulation_depth: float = 0.0
 
     def __post_init__(self) -> None:
         """Validate sensor configuration parameters."""
@@ -42,6 +44,10 @@ class SensorConfig:
             raise ValueError(
                 f"Peak intensity must be in range (0, 255], got {self.peak_intensity}"
             )
+        if self.modulation_frequency_hz < 0.0:
+            raise ValueError("Modulation frequency must be non-negative")
+        if not (0.0 <= self.modulation_depth <= 1.0):
+            raise ValueError("Modulation depth must be in range [0, 1]")
 
 
 @dataclass(frozen=True)
@@ -64,8 +70,10 @@ class MonochromeSensor:
     def __init__(self, config: Optional[SensorConfig] = None) -> None:
         self.config = config if config is not None else SensorConfig()
 
-    def capture(self, scene: Scene) -> SensorFrame:
+    def capture(self, scene: Scene, timestamp: float = 0.0) -> SensorFrame:
         """Capture a synthetic monochrome frame from current scene state."""
+        if timestamp < 0.0 or not math.isfinite(timestamp):
+            raise ValueError("timestamp must be finite and non-negative")
         width = self.config.camera_config.width
         height = self.config.camera_config.height
 
@@ -100,7 +108,10 @@ class MonochromeSensor:
             )
 
         # 6. Render synthetic beacon with subpixel precision
-        self._render_beacon(image, u_proj, v_proj)
+        modulation = 1.0 + self.config.modulation_depth * math.sin(
+            2.0 * math.pi * self.config.modulation_frequency_hz * timestamp
+        )
+        self._render_beacon(image, u_proj, v_proj, modulation)
 
         return SensorFrame(
             image=image,
@@ -109,7 +120,7 @@ class MonochromeSensor:
         )
 
     def _render_beacon(
-        self, image: np.ndarray, u_center: float, v_center: float
+        self, image: np.ndarray, u_center: float, v_center: float, intensity_scale: float = 1.0
     ) -> None:
         """Render a Gaussian beacon spot with subpixel accuracy into FPA image array."""
         width = self.config.camera_config.width
@@ -137,7 +148,11 @@ class MonochromeSensor:
         dist_sq = (u_grid - u_center) ** 2 + (v_grid - v_center) ** 2
 
         # 2D Gaussian profile
-        beacon_spot = self.config.peak_intensity * np.exp(-dist_sq / (2.0 * sigma**2))
+        beacon_spot = (
+            self.config.peak_intensity
+            * intensity_scale
+            * np.exp(-dist_sq / (2.0 * sigma**2))
+        )
 
         # Additively render onto image array and clip to [0, 255] range
         image[v_min:v_max, u_min:u_max] = np.clip(
